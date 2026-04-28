@@ -219,19 +219,15 @@ tr:hover td{background:#fafaf8;}
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M12 3v12M7 11l5 5 5-5M4 20h16" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>
       Download PDF
     </button>
-    <button class="save-btn" id="btn-save" onclick="saveToSheets()">
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M5 3h11l3 3v15H5V3z" stroke="#fff" stroke-width="1.5"/><path d="M9 3v6h6V3M8 21v-7h8v7" stroke="#fff" stroke-width="1.5"/></svg>
-      Save to Google Sheets
+    <button class="save-btn" id="btn-save-email" onclick="saveAndOpenEmail()">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><rect x="2" y="4" width="20" height="16" rx="2" stroke="#fff" stroke-width="1.5"/><path d="M2 8l10 6 10-6" stroke="#fff" stroke-width="1.5"/></svg>
+      Save & Open Email Draft
     </button>
-    <button class="email-btn" onclick="openEmailDraft()">
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><rect x="2" y="4" width="20" height="16" rx="2" stroke="#b45300" stroke-width="1.5"/><path d="M2 8l10 6 10-6" stroke="#b45300" stroke-width="1.5"/></svg>
-      Open Email Draft
-    </button>
-    <button class="email-btn" onclick="copyHTMLTable()" id="btn-copy-table" style="color:#3B6D11;border-color:#C0DD97;">
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><rect x="8" y="8" width="13" height="13" rx="2" stroke="#3B6D11" stroke-width="1.5"/><path d="M3 16V5a2 2 0 0 1 2-2h11" stroke="#3B6D11" stroke-width="1.5" stroke-linecap="round"/></svg>
+    <button class="email-btn" onclick="copyHTMLTable()">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><rect x="8" y="8" width="13" height="13" rx="2" stroke="#b45300" stroke-width="1.5"/><path d="M3 16V5a2 2 0 0 1 2-2h11" stroke="#b45300" stroke-width="1.5" stroke-linecap="round"/></svg>
       Copy HTML Table
     </button>
-    <button onclick="resetForm()" style="color:var(--muted)">Reset</button>
+    <button onclick="resetForm()" style="color:var(--muted)">Reset Form</button>
   </div>
 </main>
 </div>
@@ -432,16 +428,42 @@ function updateStats(data){
 
 function getYear(){return new Date(document.getElementById('sc-date').value||Date.now()).getFullYear();}
 function getKey(code){return `sc_${code}_${getYear()}`;}
-function getNext(code){return parseInt(localStorage.getItem(getKey(code))||'0')+1;}
 
-function updateSCNumber(){
+// SC counter: fetch from Google Sheets for cross-device sync
+let scCounterCache = {}; // {code_year: count}
+
+async function fetchSCCounter(code, year){
+  const cacheKey = code+'_'+year;
+  // Return cache if available
+  if(scCounterCache[cacheKey] !== undefined) return scCounterCache[cacheKey];
+  try{
+    const res = await fetch(GSHEET_URL+'?action=getCounter&code='+code+'&year='+year);
+    const data = await res.json();
+    const count = data.count || 0;
+    scCounterCache[cacheKey] = count;
+    return count;
+  }catch(e){
+    // Fallback to localStorage if Sheets unreachable
+    return parseInt(localStorage.getItem(getKey(code))||'0');
+  }
+}
+
+async function updateSCNumber(){
   const se=document.getElementById('sales');
   const code=se.value;
   const dv=document.getElementById('sc-date').value;
-  if(!code||!dv){document.getElementById('sc-display').textContent='—';document.getElementById('sc-info').textContent='Select sales to generate SC number';return;}
+  if(!code||!dv){
+    document.getElementById('sc-display').textContent='—';
+    document.getElementById('sc-info').textContent='Select sales to generate SC number';
+    return;
+  }
   const d=new Date(dv);
-  const n=String(getNext(code)).padStart(4,'0');
-  document.getElementById('sc-display').textContent=`${n}/SC/${code}/${ROM[d.getMonth()]}/${d.getFullYear()}`;
+  const year=d.getFullYear();
+  document.getElementById('sc-info').textContent='Loading SC number...';
+  const current = await fetchSCCounter(code, year);
+  const next = current + 1;
+  const n=String(next).padStart(4,'0');
+  document.getElementById('sc-display').textContent=`${n}/SC/${code}/${ROM[d.getMonth()]}/${year}`;
   document.getElementById('sc-info').textContent=`Next SC: ${n} · ${se.options[se.selectedIndex].text}`;
 }
 
@@ -517,9 +539,13 @@ function gf(){
   };
 }
 
-function increment(f){
-  localStorage.setItem(getKey(f.salesCode),getNext(f.salesCode));
-  updateSCNumber();
+async function increment(f){
+  const cacheKey = f.salesCode+'_'+f.year;
+  const current = scCounterCache[cacheKey] || 0;
+  scCounterCache[cacheKey] = current + 1;
+  // Also save to localStorage as backup
+  localStorage.setItem(getKey(f.salesCode), current + 1);
+  await updateSCNumber();
 }
 
 function toast(msg,type='info'){
@@ -675,26 +701,56 @@ function buildEmailHTML(f){
 <p style="font-family:Calibri,Arial,sans-serif;font-size:13px;">Best regards,<br>${f.salesName}<br>${f.salesTitle||''}<br>${f.sellerName}<br>P: +62-21-5795.0882</p>`;
 }
 
-function openEmailDraft(){
+async function saveAndEmail(){
   const f=gf();
   if(!f.salesCode){alert('Please select Sales!');return;}
   if(!f.buyer){alert('Please fill Buyer Name!');return;}
+  if(!f.product){alert('Please select Product!');return;}
+
+  // 1. Auto save to Google Sheets
+  try{
+    await fetch(GSHEET_URL,{
+      method:'POST',mode:'no-cors',
+      headers:{'Content-Type':'text/plain'},
+      body:JSON.stringify({
+        id:f.id,sc:f.sc,date:f.dateFormatted,seller:f.sellerName,
+        salesName:f.salesName,buyer:f.buyer,pic:f.pic,
+        product:f.product,spec:f.spec,currency:f.currency,
+        price:f.price,incoterm:f.incoterm,qty:f.qty,
+        packaging:f.packaging,payment:f.payment,fixation:f.fixation,
+        shipment:f.shipment,remarks:f.remarks
+      })
+    });
+    increment(f);
+  }catch(e){console.log('Save failed',e);}
+
+  // 2. Build subject
   const priceNum=parseFloat(f.price)||0;
   const priceKg=priceNum>0?(priceNum/1000).toFixed(3):'—';
   const subject='ORDER CONFIRMATION '+f.buyer.toUpperCase()+', '+f.product.toUpperCase()+' '+f.spec+', '+(f.qty||'—')+' MT, '+f.currency+' '+priceKg+' / Kg, '+f.shipment+', '+f.incoterm+', '+f.payment;
-  // Open mailto
-  window.location.href='mailto:'+encodeURIComponent(f.buyerEmail||'')+'?subject='+encodeURIComponent(subject);
-  // Auto copy HTML table after short delay
+
+  // 3. Build HTML from current form values (f)
   const htmlContent=buildEmailHTML(f);
-  setTimeout(()=>{
-    try{
-      const blob=new Blob([htmlContent],{type:'text/html'});
-      const item=new ClipboardItem({'text/html':blob});
-      navigator.clipboard.write([item])
-        .then(()=>toast('Outlook terbuka! Tabel sudah di-copy → tinggal Ctrl+V di body email ✅','success'))
-        .catch(()=>fallbackCopy(htmlContent));
-    }catch(e){fallbackCopy(htmlContent);}
-  },800);
+
+  // 4. Copy HTML to clipboard first, then open mailto
+  try{
+    const blob=new Blob([htmlContent],{type:'text/html'});
+    const item=new ClipboardItem({'text/html':blob});
+    await navigator.clipboard.write([item]);
+  }catch(e){
+    // fallback
+    const el=document.createElement('div');
+    el.innerHTML=htmlContent;el.style.position='fixed';el.style.left='-9999px';
+    document.body.appendChild(el);
+    const range=document.createRange();range.selectNodeContents(el);
+    const sel=window.getSelection();sel.removeAllRanges();sel.addRange(range);
+    try{document.execCommand('copy');}catch(e2){}
+    sel.removeAllRanges();document.body.removeChild(el);
+  }
+
+  // 5. Open Outlook with subject & to
+  window.location.href='mailto:'+encodeURIComponent(f.buyerEmail||'')+'?subject='+encodeURIComponent(subject);
+  toast('Saved! Outlook terbuka → Ctrl+V di body email untuk paste tabel ✅','success');
 }
 
 function copyHTMLTable(){
@@ -844,6 +900,83 @@ async function rowDelete(i){
   if(!r||!confirm('Delete SC '+r.sc+'?'))return;
   const idx=allData.findIndex(d=>d.id===r.id||d.sc===r.sc);
   if(idx>-1){allData.splice(idx,1);renderTable();toast('Deleted from local view. Note: re-sync with Sheets manually.','info');}
+}
+
+function resetSCCounter(){
+  const se=document.getElementById('sales');
+  if(!se.value){alert('Pilih Sales dulu!');return;}
+  const salesName=se.options[se.selectedIndex].text;
+  if(!confirm('Reset SC counter untuk '+salesName+' ke 0001?'))return;
+  localStorage.removeItem(getKey(se.value));
+  updateSCNumber();
+  toast('SC counter '+salesName+' direset ke 0001!','success');
+}
+
+function copyHTMLTable(){
+  const f=gf();
+  if(!f.salesCode){alert('Please select Sales!');return;}
+  if(!f.buyer){alert('Please fill Buyer Name!');return;}
+  const htmlContent=buildEmailHTML(f);
+  try{
+    const blob=new Blob([htmlContent],{type:'text/html'});
+    const item=new ClipboardItem({'text/html':blob});
+    navigator.clipboard.write([item])
+      .then(()=>toast('HTML table copied! Ctrl+V di body email ✅','success'))
+      .catch(()=>fallbackCopy(htmlContent));
+  }catch(e){fallbackCopy(htmlContent);}
+}
+
+async function saveAndOpenEmail(){
+  const f=gf();
+  if(!f.salesCode){alert('Please select Sales!');return;}
+  if(!f.buyer){alert('Please fill Buyer Name!');return;}
+  if(!f.product){alert('Please select Product!');return;}
+
+  const btn=document.getElementById('btn-save-email');
+  btn.textContent='Saving...';btn.disabled=true;
+
+  // 1. Save to Google Sheets
+  try{
+    await fetch(GSHEET_URL,{
+      method:'POST',mode:'no-cors',
+      headers:{'Content-Type':'text/plain'},
+      body:JSON.stringify({
+        id:f.id,sc:f.sc,date:f.dateFormatted,seller:f.sellerName,
+        salesName:f.salesName,buyer:f.buyer,pic:f.pic,
+        product:f.product,spec:f.spec,currency:f.currency,
+        price:f.price,incoterm:f.incoterm,qty:f.qty,
+        packaging:f.packaging,payment:f.payment,fixation:f.fixation,
+        shipment:f.shipment,remarks:f.remarks
+      })
+    });
+    await increment(f);
+  }catch(e){console.log('Save error',e);}
+
+  // 2. Copy HTML table to clipboard
+  const htmlContent=buildEmailHTML(f);
+  try{
+    const blob=new Blob([htmlContent],{type:'text/html'});
+    const item=new ClipboardItem({'text/html':blob});
+    await navigator.clipboard.write([item]);
+  }catch(e){
+    const el=document.createElement('div');
+    el.innerHTML=htmlContent;el.style.position='fixed';el.style.left='-9999px';
+    document.body.appendChild(el);
+    const range=document.createRange();range.selectNodeContents(el);
+    const sel=window.getSelection();sel.removeAllRanges();sel.addRange(range);
+    try{document.execCommand('copy');}catch(e2){}
+    sel.removeAllRanges();document.body.removeChild(el);
+  }
+
+  // 3. Build subject & open mailto
+  const priceNum=parseFloat(f.price)||0;
+  const priceKg=priceNum>0?(priceNum/1000).toFixed(3):'—';
+  const subject='ORDER CONFIRMATION '+f.buyer.toUpperCase()+', '+f.product.toUpperCase()+' '+f.spec+', '+(f.qty||'—')+' MT, '+f.currency+' '+priceKg+' / Kg, '+f.shipment+', '+f.incoterm+', '+f.payment;
+  window.location.href='mailto:'+encodeURIComponent(f.buyerEmail||'')+'?subject='+encodeURIComponent(subject);
+
+  btn.innerHTML='<svg width="15" height="15" viewBox="0 0 24 24" fill="none"><rect x="2" y="4" width="20" height="16" rx="2" stroke="#fff" stroke-width="1.5"/><path d="M2 8l10 6 10-6" stroke="#fff" stroke-width="1.5"/></svg> Save & Open Email Draft';
+  btn.disabled=false;
+  toast('Saved! Outlook terbuka → Ctrl+V di body email ✅','success');
 }
 </script>
 </body>
