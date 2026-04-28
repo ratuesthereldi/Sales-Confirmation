@@ -259,6 +259,14 @@ tr:hover td{background:#fafaf8;}
           <option>Corn Gluten Feed</option><option>Corn Gluten Meal</option>
         </select>
         <input type="text" id="filter-search" placeholder="Search buyer..." oninput="renderTable()" style="width:150px;"/>
+        <select id="filter-year" onchange="renderTable()" style="width:auto;padding:6px 10px;font-size:13px;">
+          <option value="">All Years</option>
+          <option value="2026">2026</option>
+          <option value="2025">2025</option>
+        </select>
+        <select id="filter-week" onchange="renderTable()" style="width:auto;padding:6px 10px;font-size:13px;">
+          <option value="">All Weeks</option>
+        </select>
         <input type="date" id="filter-date-from" onchange="renderTable()" title="From date"/>
         <span style="color:var(--muted);font-size:13px;">–</span>
         <input type="date" id="filter-date-to" onchange="renderTable()" title="To date"/>
@@ -356,7 +364,7 @@ async function loadData(){
   try{
     const res=await fetch(GSHEET_URL);
     allData=await res.json();
-    renderTable();updateStats();
+    renderTable();updateStats();populateWeekFilter();
     toast('Data loaded!','success');
   }catch(e){
     document.getElementById('data-tbody').innerHTML='<tr><td colspan="13" class="empty-state">Failed to load data.</td></tr>';
@@ -370,6 +378,8 @@ function clearFilters(){
   document.getElementById('filter-search').value='';
   document.getElementById('filter-date-from').value='';
   document.getElementById('filter-date-to').value='';
+  document.getElementById('filter-year').value='';
+  document.getElementById('filter-week').value='';
   renderTable();
 }
 
@@ -379,12 +389,16 @@ function renderTable(){
   const fSearch=document.getElementById('filter-search').value.toLowerCase();
   const fFrom=document.getElementById('filter-date-from').value;
   const fTo=document.getElementById('filter-date-to').value;
+  const fYear=document.getElementById('filter-year').value;
+  const fWeek=document.getElementById('filter-week').value;
   const filtered=allData.filter(r=>{
     if(fSales&&r.salesName!==fSales)return false;
     if(fProd&&r.product!==fProd)return false;
     if(fSearch&&!r.buyer?.toLowerCase().includes(fSearch))return false;
+    const d=parseDate(r.date);
+    if(fYear&&d&&String(d.getFullYear())!==fYear)return false;
+    if(fWeek&&d&&String(getWeekNumber(d))!==fWeek)return false;
     if(fFrom||fTo){
-      const d=parseDate(r.date);
       if(!d)return true;
       if(fFrom&&d<new Date(fFrom))return false;
       if(fTo&&d>new Date(fTo+'T23:59:59'))return false;
@@ -426,6 +440,29 @@ function renderTable(){
   updateStats(filtered);
 }
 
+function getWeekNumber(d){
+  const date=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));
+  const dayNum=date.getUTCDay()||7;
+  date.setUTCDate(date.getUTCDate()+4-dayNum);
+  const yearStart=new Date(Date.UTC(date.getUTCFullYear(),0,1));
+  return Math.ceil((((date-yearStart)/86400000)+1)/7);
+}
+
+function populateWeekFilter(){
+  const sel=document.getElementById('filter-week');
+  const cur=sel.value;
+  const weeks=new Set();
+  allData.forEach(r=>{const d=parseDate(r.date);if(d)weeks.add(getWeekNumber(d));});
+  const sorted=[...weeks].sort((a,b)=>a-b);
+  sel.innerHTML='<option value="">All Weeks</option>';
+  sorted.forEach(w=>{
+    const o=document.createElement('option');
+    o.value=w;o.textContent='Week '+w;
+    if(String(w)===cur)o.selected=true;
+    sel.appendChild(o);
+  });
+}
+
 function updateStats(data){
   const d = data || allData;
   document.getElementById('stat-total').textContent=d.length;
@@ -447,9 +484,13 @@ async function fetchSCCounter(code, year){
   try{
     const res = await fetch(GSHEET_URL);
     const data = await res.json();
-    // Count SCs that match this sales code and year
-    const prefix = '/SC/'+code+'/';
-    const count = data.filter(r => r.sc && r.sc.includes(prefix) && r.sc.endsWith('/'+year)).length;
+    // SC format: 0001/SC/LDB/IV/2026 - filter by code and year
+    const count = data.filter(r => {
+      if(!r.sc) return false;
+      const parts = r.sc.split('/');
+      // parts[0]=num, parts[1]=SC, parts[2]=code, parts[3]=month, parts[4]=year
+      return parts[2]===code && parts[4]===String(year);
+    }).length;
     scCounterCache[cacheKey] = count;
     return count;
   }catch(e){
@@ -774,7 +815,8 @@ async function saveAndEmail(){
   }
 
   // 5. Open Outlook with subject & to
-  window.location.href='mailto:'+encodeURIComponent(f.buyerEmail||'')+'?subject='+encodeURIComponent(subject);
+  const toEmail = f.buyerEmail ? f.buyerEmail+';octefi@tereos.onmicrosoft.com' : 'octefi@tereos.onmicrosoft.com';
+  window.location.href='mailto:'+encodeURIComponent(toEmail)+'?subject='+encodeURIComponent(subject);
   toast('Saved! Outlook terbuka → Ctrl+V di body email untuk paste tabel ✅','success');
 }
 
@@ -904,7 +946,8 @@ function rowEmail(i){
   const tableRows=rows.map(([k,v])=>`<tr><td style="padding:6px 12px;border:1px solid #ccc;font-weight:bold;background:#f5f5f5;width:40%;font-family:Calibri,Arial,sans-serif;font-size:13px;">${k}</td><td style="padding:6px 12px;border:1px solid #ccc;font-family:Calibri,Arial,sans-serif;font-size:13px;">${v}</td></tr>`).join('');
   const htmlContent=`<p style="font-family:Calibri,Arial,sans-serif;font-size:13px;">Dear ${picName},</p><p style="font-family:Calibri,Arial,sans-serif;font-size:13px;">Berikut Order Confirmation untuk ${r.buyer} :</p><table style="border-collapse:collapse;width:580px;margin:8px 0;">${tableRows}</table><p style="font-family:Calibri,Arial,sans-serif;font-size:13px;"><strong>SC Number: ${r.sc}</strong></p><p style="font-family:Calibri,Arial,sans-serif;font-size:13px;">Terlampir Sales Confirmation untuk ditandatangani.</p><p style="font-family:Calibri,Arial,sans-serif;font-size:13px;">Best regards,<br>${r.salesName}<br>${r.seller}<br>P: +62-21-5795.0882</p>`;
   // Open mailto with subject & to
-  window.location.href='mailto:'+encodeURIComponent(r.buyerEmail||'')+'?subject='+encodeURIComponent(subject);
+  const toEmailR = r.buyerEmail ? r.buyerEmail+';octefi@tereos.onmicrosoft.com' : 'octefi@tereos.onmicrosoft.com';
+  window.location.href='mailto:'+encodeURIComponent(toEmailR)+'?subject='+encodeURIComponent(subject);
   // Copy HTML table after short delay
   setTimeout(()=>{
     try{
@@ -1002,7 +1045,8 @@ async function saveAndOpenEmail(){
   const priceNum=parseFloat(f.price)||0;
   const priceKg=priceNum>0?(priceNum/1000).toFixed(3):'—';
   const subject='ORDER CONFIRMATION '+f.buyer.toUpperCase()+', '+f.product.toUpperCase()+' '+f.spec+', '+(f.qty||'—')+' MT, '+f.currency+' '+priceKg+' / Kg, '+f.shipment+', '+f.incoterm+', '+f.payment;
-  window.location.href='mailto:'+encodeURIComponent(f.buyerEmail||'')+'?subject='+encodeURIComponent(subject);
+  const toEmail = f.buyerEmail ? f.buyerEmail+';octefi@tereos.onmicrosoft.com' : 'octefi@tereos.onmicrosoft.com';
+  window.location.href='mailto:'+encodeURIComponent(toEmail)+'?subject='+encodeURIComponent(subject);
 
   btn.innerHTML='<svg width="15" height="15" viewBox="0 0 24 24" fill="none"><rect x="2" y="4" width="20" height="16" rx="2" stroke="#fff" stroke-width="1.5"/><path d="M2 8l10 6 10-6" stroke="#fff" stroke-width="1.5"/></svg> Save & Open Email Draft';
   btn.disabled=false;
